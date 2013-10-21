@@ -1,0 +1,471 @@
+local ofs=fs
+function pathToTable(path)
+	local t={}
+	for m in ofs.combine("",path):gmatch("[^/]+") do
+		t[#t+1]=m
+	end
+	return t
+end
+function multiIndex(tbl,ind)
+	for k,v in ipairs(ind) do
+		if not tbl then
+			return
+		end
+		tbl=tbl[v]
+	end
+	return tbl
+end
+pipe={
+	table=function(tbl)
+		return {
+			dat=tbl or {},
+			func={
+				list=function(m,path)
+					local r=multiIndex(m.dat,pathToTable(path))
+					if not r then
+						return {}
+					end
+					local o={}
+					for k,v in pairs(r) do
+						o[#o+1]=k
+					end
+					return o
+				end,
+				exists=function(m,path)
+					return multiIndex(m.dat,pathToTable(path)) and true or false
+				end,
+				isDir=function(m,path)
+					return type(multiIndex(m.dat,pathToTable(path)))=="table"
+				end,
+				isReadOnly=function()
+					return false
+				end,
+				makeDir=function(m,path)
+					local tbl=m.dat
+					local stbl
+					for k,v in ipairs(pathToTable(path)) do
+						stbl=tbl
+						tbl=tbl[v]
+						if not tbl then
+							stbl[v]={}
+							tbl=stbl[v]
+						end
+					end
+				end,
+				delete=function(m,path)
+					path=pathToTable(path)
+					local p=path[#path]
+					path[#path]=nil
+					local r=multiIndex(m.dat,path)
+					if not r or not p then
+						return
+					end
+					r[p]=nil
+				end,
+				write=function(m,path,dat)
+					path=pathToTable(path)
+					local f=path[#path]
+					path[#path]=nil
+					local r=multiIndex(m.dat,path)
+					r[f]=dat
+				end,
+				read=function(m,path)
+					return multiIndex(m.dat,pathToTable(path))
+				end
+			},
+		}
+	end,
+	modem=function(mo,chan)
+		mo.open(chan)
+		local function s(...)
+			mo.transmit(chan,os.getComputerID(),infutil.compress("queue",...))
+		end
+		local function r()
+			while true do
+				local p={os.pullEvent("modem_message")}
+				if p[3]==chan then
+					local s=infutil.decompress(p[5])
+					if s and s[1]==os.getComputerID() then
+						return unpack(s,2)
+					end
+				end
+			end
+		end
+		return {
+			func={
+				list=function(m,path)
+					s("list",path)
+					return r()
+				end,
+				exists=function(m,path)
+					s("exists",path)
+					return r()
+				end,
+				isDir=function(m,path)
+					s("isDir",path)
+					return r()
+				end,
+				isReadOnly=function(m,path)
+					s("isReadOnly",path)
+					return r()
+				end,
+				makeDir=function(m,path)
+					s("makeDir",path)
+				end,
+				delete=function(m,path)
+					s("delete",path)
+				end,
+				write=function(m,path,dat)
+					s("write",path,dat)
+				end,
+				read=function(m,path)
+					s("read",path)
+					return r()
+				end
+			},
+		}
+	end,
+}
+local tmount={}
+function getPipe(path)
+	path=pathToTable(path)
+	local p=""
+	for k,v in pairs(path) do
+		if k~=1 then
+			p=p.."/"
+		end
+		p=p..v
+		if tmount[p] then
+			return tmount[p],table.concat({unpack(path,k+1)},"/")
+		end
+	end
+end
+function mount(path,pipe)
+	if type(path)~="string" or type(pipe)~="table" then
+		error("Expected string, table",2)
+	end
+	if not pipe.func then
+		error("Invalid pipe",2)
+	end
+	ofs.delete(path)
+	ofs.makeDir(path)
+	tmount[path]=pipe
+end
+local function read(path)
+	local p,c=getPipe(path)
+	if p then
+		return p.func.read(p,c)
+	else
+		local file=ofs.open(path,"r")
+		local dat=file.readAll()
+		file.close()
+		return dat
+	end
+	return dat
+end
+local function write(path,dat)
+	local p,c=getPipe(path)
+	if p then
+		p.func.write(p,c,dat)
+	else
+		local file=ofs.open(path,"w")
+		file.write(dat)
+		file.close()
+	end
+end
+function tableize(path)
+	path=fs.combine("",path)
+	local p,c=getPipe(path)
+	if not fs.isDir(path) then
+		return read(path)
+	end
+	local ind=#path+1
+	local queue={path}
+	local out={}
+	while next(queue) do
+		local m=queue[1]
+		table.remove(queue,1)
+		local _,sname=m:match("(.+)/(.-)$")
+		sname=sname or m
+		if fs.isDir(m) then
+			if m~=path then
+				multiIndex(out,pathToTable(m:sub(ind,math.max(#m-(#sname+1),0))))[sname]={}
+			end
+			for k,v in pairs(fs.list(m)) do
+				queue[#queue+1]=m.."/"..v
+			end
+		else
+			multiIndex(out,pathToTable(m:sub(ind,math.max(#m-(#sname+1),0))))[sname]=read(m)
+		end
+	end
+	return out
+end
+function untableize(path,tbl)
+	path=fs.combine("",path)
+	if type(tbl)=="string" then
+		write(path,tbl)
+		return
+	end
+	local queue={}
+	for k,v in pairs(tbl) do
+		queue[#queue+1]={fs.combine(path,k),v}
+	end
+	while next(queue) do
+		local m=queue[1]
+		table.remove(queue,1)
+		if type(m[2])=="table" then
+			fs.makeDir(m[1])
+			for k,v in pairs(m[2]) do
+				queue[#queue+1]={m[1].."/"..k,m[2]}
+			end
+		else
+			write(m[1],m[2])
+		end
+	end
+end
+_G.fs={
+	list=function(path)
+		if type(path)~="string" then
+			error("Expected string",2)
+		end
+		local p,c=getPipe(path)
+		if p then
+			return p.func.list(p,c)
+		else
+			return ofs.list(path)
+		end
+	end,
+	exists=function(path)
+		if type(path)~="string" then
+			error("Expected string",2)
+		end
+		local p,c=getPipe(path)
+		if p then
+			if c=="" then
+				return true
+			end
+			return p.func.exists(p,c)
+		else
+			return ofs.exists(path)
+		end
+	end,
+	isDir=function(path)
+		if type(path)~="string" then
+			error("Expected string",2)
+		end
+		local p,c=getPipe(path)
+		if p then
+			if c=="" then
+				return true
+			end
+			return p.func.isDir(p,c)
+		else
+			return ofs.isDir(path)
+		end
+	end,
+	isReadOnly=function(path)
+		if type(path)~="string" then
+			error("Expected string",2)
+		end
+		local p,c=getPipe(path)
+		if p then
+			return p.func.isReadOnly(p,c)
+		else
+			return ofs.isReadOnly(path)
+		end
+	end,
+	getName=ofs.getName,
+	getDrive=function(path)
+		if type(path)~="string" then
+			error("Expected string",2)
+		end
+		if getPipe(path) then
+			return "vfs"
+		end
+		return ofs.getDrive(path)
+	end,
+	getSize=ofs.getSize,
+	getFreeSpace=ofs.getFreeSpace,
+	makeDir=function(path)
+		if type(path)~="string" then
+			error("Expected string",2)
+		end
+		local p,c=getPipe(path)
+		if p then
+			if c~="" then
+				p.func.makeDir(p,c)
+			end
+		else
+			return ofs.makeDir(path)
+		end
+	end,
+	move=function(path1,path2)
+		if type(path1)~="string" or type(path2)~="string" then
+			error("Expected string, string",2)
+		end
+		if not fs.exists(path1) then
+			error("No such file",2)
+		elseif fs.isReadOnly(path2) then
+			error("Access denied",2)
+		elseif fs.exists(path2) then
+			error("File exists",2)
+		end
+		if getPipe(path1) or getPipe(path2) then
+			untableize(path2,tableize(path1))
+			fs.delete(path1)
+		else
+			ofs.move(path1,path2)
+		end
+	end,
+	copy=function(path1,path2)
+		if type(path1)~="string" or type(path2)~="string" then
+			error("Expected string, string",2)
+		end
+		local p1,c1=getPipe(path1)
+		local p2,c2=getPipe(path2)
+		if not fs.exists(path1) then
+			error("No such file",2)
+		elseif fs.isReadOnly(path2) then
+			error("Access denied",2)
+		elseif fs.exists(path2) then
+			error("File exists",2)
+		end
+		if getPipe(path1) or getPipe(path2) then
+			untableize(path2,tableize(path1))
+		else
+			ofs.move(path1,path2)
+		end
+	end,
+	delete=function(path)
+		if type(path)~="string" then
+			error("Expected string",2)
+		end
+		local p,c=getPipe(path)
+		if p then
+			if c=="" then
+				ofs.delete(path)
+			else
+				p.func.delete(p,c)
+			end
+		else
+			ofs.delete(path)
+		end
+	end,
+	combine=ofs.combine,
+	open=function(path,mode)
+		if type(path)~="string" or type(mode)~="string" then
+			error("Expected string, string",2)
+		end
+		if #mode>2 or #mode==0 then
+			error("Unsupported mode")
+		end
+		local smode=mode:sub(2,2)
+		mode=mode:sub(1,1)
+		if mode~="a" and mode~="r" and mode~="w" and (smode=="" or smode~="b") then
+			error("Unsupported mode")
+		end
+		local p,c=getPipe(path)
+		if not p then
+			return ofs.open(path,smode..mode)
+		end
+		if p.func.isReadOnly(p,c) or p.func.isDir(p,c) then
+			return
+		end
+		local closed=false
+		local buffer=""
+		if (mode=="a" or mode=="r") and p.func.exists(p,c) then
+			buffer=p.func.read(p,c)
+		end
+		if mode=="a" or mode=="w" then
+			if mode=="b" then
+				return {
+					close=function()
+						p.func.write(p,c,buffer)
+						closed=true
+					end,
+					write=function(dat)
+						if type(dat)~="number" then
+							return
+						end
+						if closed then
+							error("Stream closed",2)
+						end
+						buffer=buffer..string.char(dat)
+					end,
+					flush=function()
+						p.func.write(p,c,buffer)
+					end,
+				}
+			end
+			return {
+				close=function()
+					p.func.write(p,c,buffer)
+					closed=true
+				end,
+				write=function(dat)
+					if closed then
+						error("Stream closed",2)
+					end
+					buffer=buffer..tostring(dat)
+				end,
+				writeLine=function(dat)
+					if closed then
+						error("Stream closed",2)
+					end
+					buffer=buffer..tostring(dat).."\n"
+				end,
+				flush=function()
+					p.func.write(p,c,buffer)
+				end,
+			}
+		else
+			if mode=="b" then
+				return {
+					close=function()
+						closed=true
+					end,
+					read=function()
+						if closed then
+							return
+						end
+						local dat=buffer:sub(1,1)
+						buffer=buffer:sub(2)
+						return string.byte(dat)
+					end,
+				}
+			end
+			return {
+				close=function()
+					closed=true
+				end,
+				readLine=function()
+					if closed then
+						return
+					end
+					local ind=buffer:find("\n")
+					if not ind then
+						local dat=buffer
+						buffer=""
+						closed=true
+						return dat
+					end
+					local dat=buffer:sub(1,ind-1)
+					buffer=buffer:sub(ind+1)
+					if buffer=="" then
+						closed=true
+					end
+					return dat
+				end,
+				readAll=function()
+					if closed then
+						return
+					end
+					closed=true
+					local dat=buffer
+					buffer=""
+					return dat
+				end,
+			}
+		end
+	end,
+}
