@@ -1,0 +1,2 @@
+-- the startup program used in the video
+vfs.mount("vfs",dofile("fileshare")())

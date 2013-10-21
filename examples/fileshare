@@ -1,0 +1,126 @@
+local function pathToTable(path)
+	local t={}
+	for m in fs.combine("",path):gmatch("[^/]+") do
+		t[#t+1]=m
+	end
+	return t
+end
+local function multiIndex(tbl,ind)
+	for k,v in ipairs(ind) do
+		if not tbl then
+			return
+		end
+		tbl=tbl[v]
+	end
+	return tbl
+end
+local ch={}
+local eat=false
+eroutine.add(function(...)
+	local p={...}
+	if p[1]=="modem_message" and ch[p[3]] then
+		local t=infutil.decompress(p[5])
+		if t[1]=="b" then
+			local s=ch[p[3]]
+			if t[2]=="dump" then
+				s.mo.transmit(p[3],os.getComputerID(),infutil.compress(p[4],"dump",s.dat))
+			elseif t[2]=="write" or t[2]=="makeDir" or t[2]=="delete" then
+				eat=true
+				s.func[t[2]](s,unpack(t,3))
+			end
+		end
+	end
+end,"fileshare")
+return function(chan,mo)
+	chan=tonumber(chan) or 13003
+	mo=mo or infutil.wrap("modem")
+	mo.open(chan)
+	local dat
+	local function s(...)
+		if not eat then
+			mo.transmit(chan,os.getComputerID(),infutil.compress("b",...))
+		end
+		eat=false
+	end
+	local dat
+	s("dump")
+	do
+		local t=os.startTimer(0.2)
+		while true do
+			local p={os.pullEvent()}
+			if p[1]=="modem_message" and p[3]==chan then
+				local s=infutil.decompress(p[5])
+				if s and s[1]==os.getComputerID() and s[2]=="dump" then
+					dat=s[3]
+					break
+				end
+			elseif p[1]=="timer" and p[2]==t then
+				dat={}
+				break
+			end
+		end
+	end
+	local mi={
+		dat=dat,
+		mo=mo,
+		func={
+			list=function(m,path)
+				local r=multiIndex(dat,pathToTable(path))
+				if not r then
+					return {}
+				end
+				local o={}
+				for k,v in pairs(r) do
+					o[#o+1]=k
+				end
+				return o
+			end,
+			exists=function(m,path)
+				return multiIndex(dat,pathToTable(path)) and true or false
+			end,
+			isDir=function(m,path)
+				return type(multiIndex(dat,pathToTable(path)))=="table"
+			end,
+			isReadOnly=function()
+				return false
+			end,
+			makeDir=function(m,path)
+				s("makeDir",path)
+				local tbl=dat
+				local stbl
+				for k,v in ipairs(pathToTable(path)) do
+					stbl=tbl
+					tbl=tbl[v]
+					if not tbl then
+						stbl[v]={}
+						tbl=stbl[v]
+					end
+				end
+			end,
+			delete=function(m,path)
+				s("delete",path)
+				path=pathToTable(path)
+				local p=path[#path]
+				path[#path]=nil
+				local r=multiIndex(dat,path)
+				if not r then
+					return
+				end
+				r[p]=nil
+			end,
+			write=function(m,path,sdat)
+				s("write",path,sdat)
+				path=pathToTable(path)
+				local f=path[#path]
+				path[#path]=nil
+				local r=multiIndex(dat,path)
+				r[f]=sdat
+			end,
+			read=function(m,path)
+				return multiIndex(dat,pathToTable(path))
+			end
+		},
+	}
+	ch[chan]=mi
+	return mi
+end
