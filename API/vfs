@@ -328,7 +328,7 @@ _G.fs={
 		if getPipe(path1) or getPipe(path2) then
 			untableize(path2,tableize(path1))
 		else
-			ofs.move(path1,path2)
+			ofs.copy(path1,path2)
 		end
 	end,
 	delete=function(path)
