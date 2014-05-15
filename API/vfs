@@ -403,6 +403,7 @@ _G.fs={
 		end
 	end,
 	combine=ofs.combine,
+	getDir=ofs.getDir,
 	open=function(path,mode)
 		if type(path)~="string" or type(mode)~="string" then
 			error("Expected string, string",2)
